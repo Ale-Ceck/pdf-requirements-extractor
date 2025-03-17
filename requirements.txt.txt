@@ -1,0 +1,15 @@
+pdfplumber
+pandas
+openai
+python-dotenv
+tenacity
+anthropic
+logging
+concurrent.futures
+re
+os
+sys
+json
+hashlib
+difflib
+

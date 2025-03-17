@@ -1,0 +1,6 @@
+.env
+__pycache__/
+.requirement_cache/
+*.pdf
+*.log
+*.xlsx
