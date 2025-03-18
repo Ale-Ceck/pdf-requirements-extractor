@@ -287,13 +287,13 @@ class RequirementsExtractor:
     
     def extract_requirements_with_fallback(self, chunk):
         """Try multiple LLMs with fallback options."""
-        models = [
+        models = []
+        if self.config["enable_anthropic"] and self.anthropic_client:
+            models.append({"provider": "anthropic", "model": self.config["anthropic_model"]})
+        models += [
             {"provider": "openai", "model": self.config["model"]},
             {"provider": "openai", "model": "gpt-4o-mini"}
         ]
-        
-        if self.config["enable_anthropic"] and self.anthropic_client:
-            models.append({"provider": "anthropic", "model": self.config["anthropic_model"]})
         
         for model_config in models:
             try:
@@ -315,7 +315,8 @@ class RequirementsExtractor:
                         messages=[{
                             "role": "user", 
                             "content": self.create_prompt(chunk)
-                        }]
+                        }],
+                        max_tokens=4000 # should be sufficient for most requirements extraction tasks.
                     )
                     return response.content[0].text
             except Exception as e:
@@ -532,7 +533,8 @@ class RequirementsExtractor:
                 elif verification_model["provider"] == "anthropic" and self.anthropic_client:
                     response = self.anthropic_client.messages.create(
                         model=verification_model["model"],
-                        messages=[{"role": "user", "content": prompt}]
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=4000
                     )
                     result = json.loads(response.content[0].text)
                 
