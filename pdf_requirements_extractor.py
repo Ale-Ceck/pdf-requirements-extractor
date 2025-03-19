@@ -444,12 +444,22 @@ class RequirementsExtractor:
             provider = "anthropic" if self.config["verification_model_name"].startswith("claude") else "openai"
             return {"provider": provider, "model": self.config["verification_model_name"]}
             
-        # Auto-select a different model
-        if self.config["model"].startswith("gpt-4o") and self.anthropic_client:
-            return {"provider": "anthropic", "model": self.config["anthropic_model"]} # Use Anthropic for GPT-4o
+        # Auto-select a different model based on the verification_model setting
+        if self.config["verification_model"] == "different":
+            if self.config["enable_anthropic"] and self.anthropic_client:
+                return {"provider": "openai", "model": "gpt-4o-mini"}
+            # Choose a different model than the one used for extraction
+            elif self.config["model"] == "gpt-4o-mini" and self.anthropic_client:
+                return {"provider": "anthropic", "model": self.config["anthropic_model"]}
+            elif self.config["model"].startswith("gpt-4"):
+                return {"provider": "openai", "model": "gpt-3.5-turbo"}
+            else:
+                return {"provider": "openai", "model": "gpt-4o-mini"}
         else:
-            return {"provider": "openai", "model": "gpt-4o-mini" if self.config["model"] != "gpt-4o-mini" else "gpt-3.5-turbo"}
-    
+            # Use the same model (shouldn't happen with default config)
+            provider = "anthropic" if self.config["model"].startswith("claude") else "openai"
+            return {"provider": provider, "model": self.config["model"]}
+        
     # todo: see if the function below is needed
     def find_relevant_context(self, full_text, requirement):
         """Find relevant context for a requirement in the full text."""
@@ -536,7 +546,16 @@ class RequirementsExtractor:
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=4000
                     )
-                    result = json.loads(response.content[0].text)
+                    # Ensure response content extraction is robust
+                    response_text = (
+                        response.content[0].text if isinstance(response.content, list) and response.content else response.content
+                    )
+                    try:
+                        result = json.loads(response_text)
+                    except json.JSONDecodeError as e:
+                        self.logger.error(f"Failed to parse Anthropic response as JSON: {e}, response: {response_text}")
+                        result = {"verified": False, "confidence": 0.0, "reason": "Failed to parse LLM response"}
+
                 
                 verification_results["confidence_scores"][req["code"]] = result["confidence"]
                 verification_results["verification_details"][req["code"]] = result
@@ -638,7 +657,16 @@ class RequirementsExtractor:
                     model=verification_model["model"],
                     messages=[{"role": "user", "content": prompt}]
                 )
-                result = json.loads(response.content[0].text)
+                # Ensure response content extraction is robust
+                response_text = (
+                    response.content[0].text if isinstance(response.content, list) and response.content else response.content
+                )
+                try:
+                    result = json.loads(response_text)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse Anthropic response as JSON: {e}, response: {response_text}")
+                    result = {"verified": False, "confidence": 0.0, "reason": "Failed to parse LLM response"}
+
                 if isinstance(result, list):
                     potential_missing = result
                 elif "missing_codes" in result:
