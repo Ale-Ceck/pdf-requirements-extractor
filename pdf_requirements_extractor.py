@@ -1,6 +1,5 @@
 import pdfplumber
 import pandas as pd
-import openai
 import re
 import os
 import sys
@@ -11,6 +10,15 @@ import concurrent.futures
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential
 from dotenv import load_dotenv, find_dotenv
+
+# Import refactor architecture components
+from model_providers import ModelProvider
+from provider_registry import ModelProviderRegistry, register_default_providers
+from config_manager import ConfigManager
+from extraction_service import ExtractionService
+
+# Register default providers
+register_default_providers()
 
 
 class RequirementsExtractor:
@@ -26,52 +34,22 @@ class RequirementsExtractor:
         # Load environment variables
         load_dotenv(find_dotenv())
         
-        # Default configuration
-        self.config = {
-            "api_key": os.environ.get("OPENAI_API_KEY"),
-            "model": "gpt-4o-mini",
-            "chunk_size": 3,
-            "max_token_size": 4000,
-            "confidence_threshold": 0.6,
-            "use_cache": True,
-            "cache_dir": ".requirement_cache",
-            "parallel_processing": True,
-            "max_workers": 3,
-            "extract_tables": True,
-            "retry_attempts": 3,
-            "enable_anthropic": False,
-            "anthropic_api_key": os.environ.get("ANTHROPIC_API_KEY"),
-            "anthropic_model": "claude-3-7-sonnet-latest",
-            "verification_model": "different",  # Use a different model from extraction
-            "verification_model_name": None,    # If None, intelligently choose
-            "adaptive_learning": True,          # Learn patterns over time
-            "patterns_file": "requirement_patterns.json",  # Store learned patterns
-            "use_semantic_similarity": False    # Use embeddings for verification if available
-        }
+        # Initialize with default configuration
+        self.config_manager = ConfigManager()
+        
+        # Get default app configuration
+        self.config = self.config_manager.get_app_config()
+        
+        # Get default extraction configuration
+        extraction_config = self.config_manager.get_extraction_config()
+        self.config.update(extraction_config)
         
         # Update with user config
         if config:
             self.config.update(config)
-            
-        # Validate config
-        if not self.config["api_key"]:
-            print(self.config["api_key"])
-            raise ValueError("API key not found. Please provide it in config or set OPENAI_API_KEY environment variable.")
         
-        # Configure OpenAI client
-        openai.api_key = self.config["api_key"]
-        
-        # Configure Anthropic client if enabled
-        self.anthropic_client = None
-        if self.config["enable_anthropic"]:
-            try:
-                import anthropic
-                if self.config["anthropic_api_key"]:
-                    self.anthropic_client = anthropic.Anthropic(api_key=self.config["anthropic_api_key"])
-                else:
-                    self.logger.warning("Anthropic enabled but no API key provided. Skipping Anthropic initialization.")
-            except ImportError:
-                self.logger.warning("anthropic package not installed. Skipping Anthropic initialization.")
+        # Initialize providers
+        self._initialize_providers()
         
         # Set up cache directory
         if self.config["use_cache"]:
@@ -86,6 +64,49 @@ class RequirementsExtractor:
                     self.logger.info(f"Loaded {len(self.learned_patterns)} previously learned patterns")
             except Exception as e:
                 self.logger.warning(f"Error loading patterns file: {e}")
+        
+        # Initialize extraction service
+        self.extraction_service = ExtractionService(self.config)
+
+    def _initialize_providers(self):
+        """Initialize all model providers"""
+        # Get primary extraction provider from config
+        provider_id = self.config.get("provider", "openai")
+        
+        # Check if OpenAI is the provider
+        if provider_id == "openai":
+            # Get OpenAI provider config
+            openai_config = self.config_manager.get_provider_config("openai")
+            
+            # Update with any API key from user config
+            if "api_key" in self.config:
+                openai_config["api_key"] = self.config["api_key"]
+            
+            # Initialize the provider
+            try:
+                openai_provider = ModelProviderRegistry.get_provider("openai", initialize=True, **openai_config)
+                if not openai_provider.is_available():
+                    raise ValueError("OpenAI API key not found or invalid.")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize OpenAI provider: {e}")
+                raise ValueError("Failed to initialize OpenAI provider. Please check your API key.")
+        
+        # Check if Anthropic should be enabled
+        if self.config.get("enable_anthropic", False):
+            # Get Anthropic provider config
+            anthropic_config = self.config_manager.get_provider_config("anthropic")
+            
+            # Update with any API key from user config
+            if "anthropic_api_key" in self.config:
+                anthropic_config["api_key"] = self.config["anthropic_api_key"]
+            
+            # Initialize the provider
+            try:
+                anthropic_provider = ModelProviderRegistry.get_provider("anthropic", initialize=True, **anthropic_config)
+                if not anthropic_provider.is_available():
+                    self.logger.warning("Anthropic enabled but unavailable. Check API key.")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize Anthropic provider: {e}")
     
     def extract_text_from_pdf(self, pdf_path):
         """Extract text from PDF document, page by page."""
@@ -214,33 +235,6 @@ class RequirementsExtractor:
         self.logger.info(f"Document semantically split into {len(chunks)} chunks.")
         return chunks
     
-    def create_prompt(self, chunk):
-        """Create LLM prompt to extract requirements."""
-        return f"""
-        Extract all requirements from the following text. Requirements typically have the following characteristics:
-        1. A unique identifier/code (such as REQ-123, SRS-01, FR-100, etc.)
-        2. A descriptive statement of what the system must do or a constraint it must meet
-        
-        For each requirement you identify, provide:
-        1. The requirement code EXACTLY as it appears in the text
-        2. The requirement description (full text of the requirement)
-        
-        Format each requirement EXACTLY as follows (keep this exact format):
-        CODE: [requirement code]
-        DESCRIPTION: [requirement description]
-        
-        Important guidelines:
-        - Extract ALL requirements present in the text, even if the format varies
-        - Include the full description, even if it spans multiple paragraphs
-        - Don't invent or generate requirements that aren't in the original text
-        - Don't make assumptions about the requirement pattern - extract exactly what's there
-        - If no requirements are found, respond with "No requirements found."
-        
-        Here's the text:
-        {chunk}
-        """
-    
-    
     def get_cache_key(self, content):
         """Generate a cache key for the content."""
         return hashlib.md5(content.encode('utf-8')).hexdigest()
@@ -252,7 +246,9 @@ class RequirementsExtractor:
             if self.config["use_cache"]:
                 return self.extract_requirements_with_cache(chunk)
             else:
-                return self.extract_requirements_with_fallback(chunk)
+                # Use our extraction service
+                llm_output = self.extract_requirements_without_cache(chunk)
+                return llm_output
         except Exception as e:
             self.logger.error(f"Error in LLM call, retrying: {e}")
             raise  # Re-raise to trigger retry
@@ -274,7 +270,7 @@ class RequirementsExtractor:
                     # Cache may be corrupted, proceed to API call
         
         # Make API call
-        response = self.extract_requirements_with_fallback(chunk)
+        response = self.extract_requirements_without_cache(chunk)
         
         # Save to cache
         try:
@@ -285,96 +281,55 @@ class RequirementsExtractor:
         
         return response
     
-    def extract_requirements_with_fallback(self, chunk):
-        """Try multiple LLMs with fallback options."""
-        models = []
-        if self.config["enable_anthropic"] and self.anthropic_client:
-            models.append({"provider": "anthropic", "model": self.config["anthropic_model"]})
-        models += [
-            {"provider": "openai", "model": self.config["model"]},
-            {"provider": "openai", "model": "gpt-4o-mini"}
-        ]
-        
-        for model_config in models:
-            try:
-                if model_config["provider"] == "openai":
-                    # OpenAI implementation with correct response handling
-                    response = openai.chat.completions.create(
-                        model=model_config["model"],
-                        messages=[{
-                            "role": "user", 
-                            "content": self.create_prompt(chunk)
-                        }]
-                    )
-                    # Correctly access the message content
-                    return response.choices[0].message.content
-                elif model_config["provider"] == "anthropic" and self.anthropic_client:
-                    # Anthropic implementation
-                    response = self.anthropic_client.messages.create(
-                        model=model_config["model"],
-                        messages=[{
-                            "role": "user", 
-                            "content": self.create_prompt(chunk)
-                        }],
-                        max_tokens=4000 # should be sufficient for most requirements extraction tasks.
-                    )
-                    return response.content[0].text
-            except Exception as e:
-                self.logger.warning(
-                    f"Error with {model_config['provider']} {model_config['model']}: {e}"
-                )
-                continue
-                
-        # If all models fail, raise exception
-        raise Exception("All LLM attempts failed")
+    def extract_requirements_without_cache(self, chunk):
+        """Extract requirements using the configured provider through our extraction service"""
+        try:
+            # Create extraction prompt
+            prompt = self.extraction_service.create_extraction_prompt(chunk)
+            
+            # Get provider from registry
+            provider_id = self.config.get("provider", "openai")
+            provider = ModelProviderRegistry.get_provider(provider_id)
+            
+            # Get the model to use
+            model = self.config.get("model") or provider.get_default_model()
+            
+            # Call the provider
+            response = provider.extract_text(prompt=prompt, model=model)
+            return response
+            
+        except Exception as e:
+            self.logger.error(f"Error extracting requirements: {e}")
+            
+            # Try fallback providers if available
+            fallback_providers = []
+            
+            # If main provider was OpenAI, try Anthropic as fallback
+            if provider_id == "openai" and self.config.get("enable_anthropic", False):
+                fallback_providers.append("anthropic")
+            # If main provider was Anthropic, try OpenAI as fallback
+            elif provider_id == "anthropic":
+                fallback_providers.append("openai")
+            
+            # Try fallback providers
+            for fallback_id in fallback_providers:
+                try:
+                    self.logger.info(f"Attempting fallback to {fallback_id}")
+                    fallback = ModelProviderRegistry.get_provider(fallback_id)
+                    if fallback.is_available():
+                        fallback_model = fallback.get_default_model()
+                        response = fallback.extract_text(prompt=prompt, model=fallback_model)
+                        return response
+                except Exception as fallback_error:
+                    self.logger.warning(f"Fallback to {fallback_id} failed: {fallback_error}")
+            
+            # If all providers fail, re-raise the original exception
+            raise RuntimeError(f"All extraction providers failed: {e}")
     
     def parse_requirements(self, llm_output):
         """Parse structured requirements from LLM output with improved error handling."""
-        if "No requirements found" in llm_output:
-            return []
-                
-        pattern = r"CODE: (.*?)\nDESCRIPTION: (.*?)(?=\nCODE:|$)"
-        matches = re.findall(pattern, llm_output, re.DOTALL)
-        
-        if not matches and "CODE:" in llm_output and "DESCRIPTION:" in llm_output:
-            # Fallback parsing for non-standard formatting
-            lines = llm_output.split('\n')
-            requirements = []
-            current_code = None
-            current_description = []
-            
-            for line in lines:
-                if line.startswith("CODE:"):
-                    if current_code and current_description:
-                        requirements.append({
-                            "code": current_code.strip(),
-                            "description": "\n".join(current_description).strip(),
-                            "source_type": "text"
-                        })
-                    current_code = line.replace("CODE:", "").strip()
-                    current_description = []
-                elif line.startswith("DESCRIPTION:"):
-                    current_description.append(line.replace("DESCRIPTION:", "").strip())
-                elif current_description:
-                    current_description.append(line)
-                    
-            if current_code and current_description:
-                requirements.append({
-                    "code": current_code.strip(),
-                    "description": "\n".join(current_description).strip(),
-                    "source_type": "text"
-                })
-            return requirements
-        
-        requirements = []
-        for code, description in matches:
-            requirements.append({
-                "code": code.strip(),
-                "description": description.strip(),
-                "source_type": "text"
-            })
-        
-        return requirements
+        # Use our new extraction service to parse requirements
+        return self.extraction_service.parse_requirements(llm_output)
     
     def process_single_chunk(self, chunk):
         """Process a single chunk to extract requirements."""
@@ -437,30 +392,6 @@ class RequirementsExtractor:
         
         return validation_results
     
-    def get_verification_model(self):
-        """Determine which model to use for verification (different from extraction)."""
-        if self.config["verification_model_name"]:
-            # Use explicitly specified verification model
-            provider = "anthropic" if self.config["verification_model_name"].startswith("claude") else "openai"
-            return {"provider": provider, "model": self.config["verification_model_name"]}
-            
-        # Auto-select a different model based on the verification_model setting
-        if self.config["verification_model"] == "different":
-            if self.config["enable_anthropic"] and self.anthropic_client:
-                return {"provider": "openai", "model": "gpt-4o-mini"}
-            # Choose a different model than the one used for extraction
-            elif self.config["model"] == "gpt-4o-mini" and self.anthropic_client:
-                return {"provider": "anthropic", "model": self.config["anthropic_model"]}
-            elif self.config["model"].startswith("gpt-4"):
-                return {"provider": "openai", "model": "gpt-3.5-turbo"}
-            else:
-                return {"provider": "openai", "model": "gpt-4o-mini"}
-        else:
-            # Use the same model (shouldn't happen with default config)
-            provider = "anthropic" if self.config["model"].startswith("claude") else "openai"
-            return {"provider": provider, "model": self.config["model"]}
-        
-    # todo: see if the function below is needed
     def find_relevant_context(self, full_text, requirement):
         """Find relevant context for a requirement in the full text."""
         # Try to find the requirement code in the text first
@@ -468,8 +399,8 @@ class RequirementsExtractor:
         contexts = []
         
         for match in code_matches:
-            start_pos = max(0, match.start() - 500)
-            end_pos = min(len(full_text), match.end() + 1000)
+            start_pos = max(0, match.start() - 50)
+            end_pos = min(len(full_text), match.end() + 2000)
             contexts.append(full_text[start_pos:end_pos])
             
             # Limit to 3 context windows to keep the prompt size manageable
@@ -505,58 +436,16 @@ class RequirementsExtractor:
             "verification_details": {}
         }
         
-        # Use a different model for verification to reduce bias
-        verification_model = self.get_verification_model()
-        self.logger.info(f"Using {verification_model['provider']}-{verification_model['model']} for verification")
-        
-        # Verify each requirement with the verification model
+        # Verify each requirement
         for req in extracted_requirements:
             # Find relevant context for this requirement
             relevant_context = self.find_relevant_context(pdf_text, req)
             
-            prompt = f"""
-            Verify if this requirement description accurately matches the original text. 
-            
-            Requirement code: {req["code"]}
-            Requirement description: {req["description"]}
-            
-            Review the surrounding context from the PDF and determine:
-            1. If this code and description are actually present in the original text
-            2. If this description is accurate and complete
-            3. Assign a confidence score from 0.0 to 1.0
-            
-            Context from PDF (relevant sample):
-            {relevant_context}
-            
-            Return ONLY a JSON object with format:
-            {{"verified": true/false, "confidence": 0.0-1.0, "reason": "brief explanation"}}
-            """
-            # Call the verification model
             try:
-                if verification_model["provider"] == "openai":
-                    response = openai.chat.completions.create(
-                        model=verification_model["model"],
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"}
-                    )
-                    result = json.loads(response.choices[0].message.content)
-                elif verification_model["provider"] == "anthropic" and self.anthropic_client:
-                    response = self.anthropic_client.messages.create(
-                        model=verification_model["model"],
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=4000
-                    )
-                    # Ensure response content extraction is robust
-                    response_text = (
-                        response.content[0].text if isinstance(response.content, list) and response.content else response.content
-                    )
-                    try:
-                        result = json.loads(response_text)
-                    except json.JSONDecodeError as e:
-                        self.logger.error(f"Failed to parse Anthropic response as JSON: {e}, response: {response_text}")
-                        result = {"verified": False, "confidence": 0.0, "reason": "Failed to parse LLM response"}
-
+                # Use extraction service to verify the requirement
+                result = self.extraction_service.verify_requirement(req, relevant_context)
                 
+                # Store verification results
                 verification_results["confidence_scores"][req["code"]] = result["confidence"]
                 verification_results["verification_details"][req["code"]] = result
                 
@@ -634,43 +523,48 @@ class RequirementsExtractor:
         If you don't find any additional requirements, return an empty list.
         
         Text to analyze:
-        {pdf_text[:10000]}  # Using first chunk of text to keep prompt size manageable
+        {pdf_text}
         """
         
-        verification_model = self.get_verification_model()
+        # Use the same strategy as verification to select a provider
+        verification_strategy = self.config.get("verification_strategy", "different")
+        provider_id = self.config.get("provider", "openai")
+        
+        # If verification strategy is "different", use a different provider than extraction
+        if verification_strategy == "different":
+            available_providers = ModelProviderRegistry.get_available_providers()
+            for p_id in available_providers:
+                if p_id != provider_id:
+                    provider_id = p_id
+                    break
+        
+        # If verification strategy is "specific", use the specified provider
+        elif verification_strategy == "specific":
+            specific_provider = self.config.get("verification_provider")
+            if specific_provider:
+                provider_id = specific_provider
+        
         potential_missing = []
         
         try:
-            if verification_model["provider"] == "openai":
-                response = openai.chat.completions.create(
-                    model=verification_model["model"],
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"}
-                )
-                result = json.loads(response.choices[0].message.content)
-                if isinstance(result, list):
-                    potential_missing = result
-                elif "missing_codes" in result:
-                    potential_missing = result["missing_codes"]
-            elif verification_model["provider"] == "anthropic" and self.anthropic_client:
-                response = self.anthropic_client.messages.create(
-                    model=verification_model["model"],
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                # Ensure response content extraction is robust
-                response_text = (
-                    response.content[0].text if isinstance(response.content, list) and response.content else response.content
-                )
-                try:
-                    result = json.loads(response_text)
-                except json.JSONDecodeError as e:
-                    self.logger.error(f"Failed to parse Anthropic response as JSON: {e}, response: {response_text}")
-                    result = {"verified": False, "confidence": 0.0, "reason": "Failed to parse LLM response"}
-
-                if isinstance(result, list):
-                    potential_missing = result
-                elif "missing_codes" in result:
-                    potential_missing = result["missing_codes"]
+            # Get the provider
+            provider = ModelProviderRegistry.get_provider(provider_id)
+            
+            # Get the model
+            if verification_strategy == "specific" and self.config.get("verification_model"):
+                model = self.config.get("verification_model")
+            else:
+                model = provider.get_default_model()
+            
+            # Call the provider
+            result = provider.verify_text(prompt=prompt, model=model)
+            
+            # Process the result
+            if isinstance(result, list):
+                potential_missing = result
+            elif "missing_codes" in result:
+                potential_missing = result["missing_codes"]
+                
         except Exception as e:
             self.logger.error(f"Error finding potential missing requirements: {e}")
         
