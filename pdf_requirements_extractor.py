@@ -70,13 +70,65 @@ class RequirementsExtractor:
 
     def _initialize_providers(self):
         """Initialize all model providers"""
+        # Check if we should prefer offline providers
+        use_offline = self.config_manager.use_offline_provider()
+        
+        # Get all provider configurations
+        provider_configs = {}
+        for provider_id in ModelProviderRegistry.get_available_providers():
+            provider_configs[provider_id] = self.config_manager.get_provider_config(provider_id)
+        
+        # Initialize offline providers first if preferred
+        if use_offline:
+            self.logger.info("Preferring offline providers if available")
+            self._initialize_offline_providers(provider_configs)
+            
+            # Check if any offline providers are available
+            offline_providers = self.config_manager.get_offline_providers()
+            if offline_providers:
+                # Set the first available offline provider as default
+                provider_id = offline_providers[0]
+                self.config["provider"] = provider_id
+                self.logger.info(f"Using offline provider: {provider_id}")
+                return
+                
+            # If no offline providers are available, fall back to online providers
+            self.logger.warning("No offline providers available, falling back to online providers")
+        
+        # Initialize online providers
+        self._initialize_online_providers(provider_configs)
+        
         # Get primary extraction provider from config
         provider_id = self.config.get("provider", "openai")
-        
-        # Check if OpenAI is the provider
-        if provider_id == "openai":
+        self.logger.info(f"Using provider: {provider_id}")
+    
+    def _initialize_offline_providers(self, provider_configs):
+        """Initialize offline providers"""
+        # Initialize Ollama if enabled
+        if provider_configs.get("ollama", {}).get("enabled", False):
+            ollama_config = provider_configs["ollama"]
+            
+            try:
+                ollama_provider = ModelProviderRegistry.get_provider("ollama", initialize=True, **ollama_config)
+                
+                if ollama_provider.is_available():
+                    self.logger.info(f"Ollama initialized successfully with {len(ollama_provider.available_models)} models")
+                    
+                    # Set as default provider if offline is preferred
+                    if self.config_manager.use_offline_provider():
+                        self.config["provider"] = "ollama"
+                        self.config["model"] = ollama_provider.get_default_model()
+                else:
+                    self.logger.warning("Ollama enabled but not available. Check if Ollama is running.")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize Ollama provider: {e}")
+    
+    def _initialize_online_providers(self, provider_configs):
+        """Initialize online providers"""
+        # Check if OpenAI is enabled
+        if provider_configs.get("openai", {}).get("enabled", False):
             # Get OpenAI provider config
-            openai_config = self.config_manager.get_provider_config("openai")
+            openai_config = provider_configs["openai"]
             
             # Update with any API key from user config
             if "api_key" in self.config:
@@ -86,15 +138,19 @@ class RequirementsExtractor:
             try:
                 openai_provider = ModelProviderRegistry.get_provider("openai", initialize=True, **openai_config)
                 if not openai_provider.is_available():
-                    raise ValueError("OpenAI API key not found or invalid.")
+                    self.logger.warning("OpenAI enabled but API key not found or invalid.")
+                else:
+                    # Set as default provider if no offline provider is preferred or available
+                    if not self.config_manager.use_offline_provider():
+                        self.config["provider"] = "openai"
+                        self.config["model"] = openai_provider.get_default_model()
             except Exception as e:
                 self.logger.error(f"Failed to initialize OpenAI provider: {e}")
-                raise ValueError("Failed to initialize OpenAI provider. Please check your API key.")
         
-        # Check if Anthropic should be enabled
-        if self.config.get("enable_anthropic", False):
+        # Check if Anthropic is enabled
+        if provider_configs.get("anthropic", {}).get("enabled", False):
             # Get Anthropic provider config
-            anthropic_config = self.config_manager.get_provider_config("anthropic")
+            anthropic_config = provider_configs["anthropic"]
             
             # Update with any API key from user config
             if "anthropic_api_key" in self.config:
@@ -107,6 +163,23 @@ class RequirementsExtractor:
                     self.logger.warning("Anthropic enabled but unavailable. Check API key.")
             except Exception as e:
                 self.logger.warning(f"Failed to initialize Anthropic provider: {e}")
+        
+        # Check if Together.ai is enabled
+        if provider_configs.get("together", {}).get("enabled", False):
+            # Get Together.ai provider config
+            together_config = provider_configs["together"]
+            
+            # Update with any API key from user config
+            if "together_api_key" in self.config:
+                together_config["api_key"] = self.config["together_api_key"]
+            
+            # Initialize the provider
+            try:
+                together_provider = ModelProviderRegistry.get_provider("together", initialize=True, **together_config)
+                if not together_provider.is_available():
+                    self.logger.warning("Together.ai enabled but unavailable. Check API key.")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize Together.ai provider: {e}")
     
     def extract_text_from_pdf(self, pdf_path):
         """Extract text from PDF document, page by page."""
@@ -779,7 +852,18 @@ def main():
     parser.add_argument("--no-parallel", action="store_true", help="Disable parallel processing")
     parser.add_argument("--no-tables", action="store_true", help="Disable table extraction")
     parser.add_argument("--workers", type=int, default=3, help="Number of parallel workers")
-    parser.add_argument("--enable-anthropic", action="store_true", help="Enable Anthropic Claude as fallback")
+    
+    # Provider selection arguments
+    provider_group = parser.add_argument_group("Provider Options")
+    provider_group.add_argument("--provider", choices=["openai", "anthropic", "together", "ollama"], 
+                              help="Specify provider to use")
+    provider_group.add_argument("--enable-anthropic", action="store_true", help="Enable Anthropic Claude as fallback")
+    provider_group.add_argument("--use-offline", action="store_true", 
+                              help="Use offline providers (like Ollama) if available")
+    provider_group.add_argument("--enable-ollama", action="store_true", 
+                              help="Enable Ollama local LLM provider")
+    provider_group.add_argument("--ollama-server", default="http://localhost:11434",
+                              help="Ollama server URL (default: http://localhost:11434)")
     
     args = parser.parse_args()
     
@@ -791,8 +875,20 @@ def main():
         "parallel_processing": not args.no_parallel,
         "extract_tables": not args.no_tables,
         "max_workers": args.workers,
-        "enable_anthropic": args.enable_anthropic
+        "enable_anthropic": args.enable_anthropic,
+        "use_offline_provider": args.use_offline
     }
+    
+    # Handle provider selection
+    if args.provider:
+        config["provider"] = args.provider
+        
+    # Configure Ollama if enabled
+    if args.enable_ollama:
+        config["ollama"] = {
+            "enabled": True,
+            "server_url": args.ollama_server
+        }
     
     try:
         extractor = RequirementsExtractor(config)

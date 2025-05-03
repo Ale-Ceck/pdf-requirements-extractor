@@ -4,12 +4,8 @@ openai
 python-dotenv
 tenacity
 anthropic
-logging
-concurrent.futures
-re
-os
-sys
-json
-hashlib
-difflib
 PyQt6
+requests>=2.30.0  # For Ollama API communication
+flask>=2.0.0      # For API Server
+flask-cors>=3.0.0 # For enabling CORS
+werkzeug>=2.0.0   # For file handling

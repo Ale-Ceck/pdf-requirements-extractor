@@ -31,25 +31,38 @@ class ConfigManager:
             "retry_attempts": 3,
             "adaptive_learning": True,
             "patterns_file": "requirement_patterns.json",
-            "use_semantic_similarity": False
+            "use_semantic_similarity": False,
+            "use_offline_provider": False  # Whether to prefer offline providers
         },
         
         # Provider configurations
         "providers": {
+            # Online providers
             "openai": {
                 "api_key": None,  # Will be loaded from environment if not specified
                 "default_model": "gpt-4o-mini",
-                "enabled": True
+                "enabled": True,
+                "provider_type": "online"
             },
             "anthropic": {
                 "api_key": None,  # Will be loaded from environment if not specified
                 "default_model": "claude-3-5-haiku-latest",
-                "enabled": False
+                "enabled": False,
+                "provider_type": "online"
             },
             "together": {
                 "api_key": None,  # Will be loaded from environment if not specified
                 "default_model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
-                "enabled": False
+                "enabled": False,
+                "provider_type": "online"
+            },
+            
+            # Offline providers
+            "ollama": {
+                "server_url": "http://localhost:11434",
+                "default_model": "llama3",
+                "enabled": False,
+                "provider_type": "offline"
             }
             # Additional providers can be added here
         },
@@ -181,6 +194,41 @@ class ConfigManager:
             if config.get("enabled", False):
                 enabled.append(provider_id)
         return enabled
+    
+    def get_online_providers(self) -> List[str]:
+        """
+        Get list of enabled online provider IDs
+        
+        Returns:
+            List of enabled online provider IDs
+        """
+        enabled = []
+        for provider_id, config in self.config.get("providers", {}).items():
+            if config.get("enabled", False) and config.get("provider_type") == "online":
+                enabled.append(provider_id)
+        return enabled
+    
+    def get_offline_providers(self) -> List[str]:
+        """
+        Get list of enabled offline provider IDs
+        
+        Returns:
+            List of enabled offline provider IDs
+        """
+        enabled = []
+        for provider_id, config in self.config.get("providers", {}).items():
+            if config.get("enabled", False) and config.get("provider_type") == "offline":
+                enabled.append(provider_id)
+        return enabled
+    
+    def use_offline_provider(self) -> bool:
+        """
+        Check if offline providers should be used preferentially
+        
+        Returns:
+            True if offline providers should be preferred, False otherwise
+        """
+        return self.config["app"].get("use_offline_provider", False)
     
     def _update_nested_dict(self, target: Dict, source: Dict) -> None:
         """

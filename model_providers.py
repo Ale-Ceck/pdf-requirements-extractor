@@ -461,7 +461,168 @@ class TogetherAIProvider(ModelProvider):
         except Exception as e:
             raise RuntimeError(f"Error during verification with Together.ai API: {str(e)}")
 
-# You can add more providers here, like:
-# class GeminiProvider(ModelProvider):
-#     """Implementation for Google's Gemini models"""
+# Online providers above, offline providers below
+
+class OllamaProvider(ModelProvider):
+    """Implementation of ModelProvider for Ollama local LLMs"""
+    
+    DEFAULT_MODEL = "llama3"
+    
+    def __init__(self):
+        self.initialized = False
+        self.available_models = []
+        self.server_url = "http://localhost:11434"
+    
+    @classmethod
+    def get_provider_name(cls) -> str:
+        return "Ollama"
+    
+    @classmethod
+    def get_available_models(cls) -> List[str]:
+        # This will be populated dynamically when initialized
+        return []
+    
+    def get_default_model(self) -> str:
+        return self.DEFAULT_MODEL if self.DEFAULT_MODEL in self.available_models else (self.available_models[0] if self.available_models else "")
+    
+    def initialize(self, server_url: str = None, **kwargs) -> bool:
+        """
+        Initialize the Ollama provider
+        
+        Args:
+            server_url: The URL of the Ollama server (default: http://localhost:11434)
+            **kwargs: Additional settings
+            
+        Returns:
+            True if initialization was successful, False otherwise
+        """
+        try:
+            import requests
+            
+            # Set server URL
+            if server_url:
+                self.server_url = server_url
+                
+            # Check if Ollama server is running
+            try:
+                response = requests.get(f"{self.server_url}/api/tags")
+                if response.status_code == 200:
+                    # Get available models from Ollama
+                    models_data = response.json().get("models", [])
+                    self.available_models = [m.get("name") for m in models_data if "name" in m]
+                    
+                    if not self.available_models:
+                        print("No models found in Ollama server")
+                        return False
+                    
+                    self.initialized = True
+                    return True
+                else:
+                    print(f"Error connecting to Ollama server: {response.status_code}")
+                    return False
+            except requests.RequestException as e:
+                print(f"Ollama server not running at {self.server_url}: {e}")
+                return False
+            
+        except ImportError:
+            print("Requests package not installed. Please install with 'pip install requests'")
+            return False
+    
+    def is_available(self) -> bool:
+        return self.initialized and bool(self.available_models)
+    
+    def extract_text(self, prompt: str, model: str = None, **kwargs) -> str:
+        if not self.is_available():
+            raise RuntimeError("Ollama provider not initialized")
+            
+        model = model or self.get_default_model()
+        if not model:
+            raise RuntimeError("No models available in Ollama")
+        
+        try:
+            import requests
+            import json
+            
+            url = f"{self.server_url}/api/generate"
+            
+            # Set up parameters
+            data = {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": kwargs.get("temperature", 0.7),
+                    "top_p": kwargs.get("top_p", 0.9),
+                    "num_predict": kwargs.get("max_tokens", 2048)
+                }
+            }
+            
+            response = requests.post(url, json=data)
+            
+            # Check if request was successful
+            if response.status_code == 200:
+                result = response.json()
+                return result.get("response", "")
+            else:
+                raise RuntimeError(f"Error from Ollama API: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            raise RuntimeError(f"Error calling Ollama API: {str(e)}")
+    
+    def verify_text(self, prompt: str, model: str = None, **kwargs) -> Dict[str, Any]:
+        if not self.is_available():
+            raise RuntimeError("Ollama provider not initialized")
+            
+        model = model or self.get_default_model()
+        
+        try:
+            # First get the text response
+            response_text = self.extract_text(prompt, model, **kwargs)
+            
+            # Try to parse it as JSON
+            import json
+            import re
+            
+            # Clean the response - some models might wrap JSON in markdown code blocks
+            json_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
+            match = re.search(json_pattern, response_text)
+            if match:
+                json_str = match.group(1)
+            else:
+                json_str = response_text
+            
+            # Try to find JSON object in the text
+            try:
+                # Look for the first { and the last } to extract JSON
+                start_idx = json_str.find('{')
+                end_idx = json_str.rfind('}')
+                
+                if start_idx != -1 and end_idx != -1:
+                    json_obj = json_str[start_idx:end_idx+1]
+                    result = json.loads(json_obj)
+                    return result
+                else:
+                    raise ValueError("No JSON object found in response")
+                    
+            except json.JSONDecodeError:
+                # If parsing fails, try to construct a minimal valid response
+                if "verified" in response_text.lower():
+                    is_verified = "true" in response_text.lower() or "yes" in response_text.lower()
+                    confidence = 0.9 if is_verified else 0.2
+                    reason = "Based on model assessment (non-JSON response)"
+                    
+                    return {
+                        "verified": is_verified,
+                        "confidence": confidence,
+                        "reason": reason
+                    }
+                else:
+                    raise ValueError("Could not extract verification result from response")
+                
+        except Exception as e:
+            raise RuntimeError(f"Error during verification with Ollama: {str(e)}")
+
+# You can add more offline providers here, like:
+# class LlamaCppProvider(ModelProvider):
+#     """Implementation for llama.cpp models"""
 #     pass

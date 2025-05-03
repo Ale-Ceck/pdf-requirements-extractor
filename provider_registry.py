@@ -141,10 +141,14 @@ class ModelProviderRegistry:
 def register_default_providers():
     """Register the default built-in providers"""
     
-    from model_providers import OpenAIProvider, AnthropicProvider, TogetherAIProvider
+    from model_providers import OpenAIProvider, AnthropicProvider, TogetherAIProvider, OllamaProvider
     
+    # Register online providers
     ModelProviderRegistry.register("openai", OpenAIProvider)
     ModelProviderRegistry.register("anthropic", AnthropicProvider)
     ModelProviderRegistry.register("together", TogetherAIProvider)
+    
+    # Register offline providers
+    ModelProviderRegistry.register("ollama", OllamaProvider)
     
     # Additional providers can be registered here as they're implemented

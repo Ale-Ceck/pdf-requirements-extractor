@@ -5,8 +5,10 @@ The **PDF Requirements Extractor** is a tool designed to extract requirements fr
 
 ## Features
 - Extracts textual and tabular requirements from PDF documents.
-- Uses **OpenAI GPT models** for enhanced accuracy in extracting requirements.
-- Supports **semantic chunking** to improve contextual understanding.
+- **Modern React-based UI** for easy interaction and configuration.
+- Supports both **online** (API-based) and **offline** (local) processing modes.
+- Integrates with multiple AI providers (**OpenAI**, **Anthropic**, **Together.ai**, **Ollama**).
+- Uses **semantic chunking** to improve contextual understanding.
 - **Parallel processing** for improved performance.
 - **Adaptive learning**: learns patterns over time for better extractions.
 - Verifies extracted requirements using **a separate AI model** to reduce bias.
@@ -18,44 +20,88 @@ The **PDF Requirements Extractor** is a tool designed to extract requirements fr
 - Enhances accuracy through **AI-powered verification**.
 - Supports **scalability** by handling multiple documents efficiently.
 - Provides structured outputs that can be easily reviewed and processed further.
+- **Offline mode** with Ollama support for private/secure environments or when API access is restricted.
 
 ## Installation
 ### Prerequisites
 Ensure you have the following installed:
 - Python 3.8 or later
+- Node.js 16+ and npm (for the React frontend)
 - Required Python packages (install using the command below)
+- For offline mode: [Ollama](https://ollama.com/download) with at least one model installed
 
 ### Setup
 Clone the repository:
 ```sh
-$ git clone https://github.com/your-repo/pdf-requirements-extractor.git
+$ git clone https://github.com/Ale-Ceck/pdf-requirements-extractor.git
 $ cd pdf-requirements-extractor
 ```
-Install dependencies:
+
+Install Python dependencies:
 ```sh
 $ pip install -r requirements.txt
 ```
-Set up API keys (create a `.env` file in the project directory):
+
+Set up API keys (create a `.env` file in the project directory or set environment variables):
 ```
 OPENAI_API_KEY=your_openai_api_key
 ANTHROPIC_API_KEY=your_anthropic_api_key  # Optional
+TOGETHER_API_KEY=your_together_api_key    # Optional
+```
+
+For the web interface, build the React frontend:
+```sh
+$ cd frontend
+$ npm install
+$ npm run build
+$ cd ..
 ```
 
 ## Usage
-### Extract requirements from a single PDF:
+
+### Web Interface
+1. Start the API server:
+   ```sh
+   $ python api_server.py
+   ```
+
+2. Open your browser and navigate to [http://localhost:5000](http://localhost:5000)
+
+3. Select your operation mode (online or offline):
+   - Online mode uses external API services like OpenAI or Anthropic
+   - Offline mode uses local Ollama models for processing without internet
+
+4. Configure your model settings and upload a PDF file
+
+5. View the extracted requirements in the generated Excel file
+
+### Command Line Interface
+Extract requirements from a single PDF:
 ```sh
 $ python pdf_requirements_extractor.py input.pdf -o output.xlsx
 ```
-### Batch process multiple PDFs in a directory:
+
+Batch process multiple PDFs in a directory:
 ```sh
 $ python pdf_requirements_extractor.py input_directory -b -o output_directory
 ```
+
+For offline processing with Ollama:
+```sh
+$ python pdf_requirements_extractor.py input.pdf --use-offline --enable-ollama
+```
+
 ### Additional Options:
 - `--semantic-chunking`: Use smarter chunking for structured PDFs.
 - `--no-cache`: Disable caching to force re-processing.
 - `--no-parallel`: Disable parallel processing for sequential execution.
 - `--no-tables`: Ignore table-based requirements extraction.
 - `--workers X`: Set the number of parallel workers.
+- `--provider`: Specify provider to use (openai, anthropic, together, ollama).
+- `--enable-anthropic`: Enable Anthropic Claude as fallback.
+- `--use-offline`: Use offline providers (like Ollama) if available.
+- `--enable-ollama`: Enable Ollama local LLM provider.
+- `--ollama-server`: Ollama server URL (default: http://localhost:11434).
 
 ## Output Format
 The extracted requirements are saved in an Excel file with multiple sheets:
@@ -64,6 +110,16 @@ The extracted requirements are saved in an Excel file with multiple sheets:
 - **Validation**: Validation results (formatting, completeness checks).
 - **Verification**: AI-based verification results.
 - **Confidence Scores**: Confidence scores for each requirement.
+
+## Configuration
+The application uses a configuration file `requirements_extractor_config.json` that's created automatically. You can edit this file directly or use the web interface to configure settings.
+
+Key configuration options:
+- `use_cache`: Enable/disable caching of API responses
+- `extract_tables`: Enable/disable table extraction
+- `parallel_processing`: Enable/disable parallel processing
+- `verification_strategy`: Strategy for verifying extracted requirements ('same', 'different', or 'specific')
+- `confidence_threshold`: Threshold for requirement verification confidence (0.0-1.0)
 
 ## Contributing
 1. Fork the repository.
@@ -76,4 +132,3 @@ This project is licensed under the MIT License.
 
 ---
 For any issues or feature requests, feel free to open an issue on GitHub!
-
