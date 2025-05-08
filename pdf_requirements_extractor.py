@@ -440,25 +440,44 @@ class RequirementsExtractor:
             all_requirements.extend(chunk_requirements)
         return all_requirements
     
-    def validate_requirements(self, requirements):
+    def normalize_whitespace(self, s):
+        return re.sub(r'\s+', ' ', s).strip().lower()
+
+    def validate_requirements(self, requirements, full_text=None):
         """Validate extracted requirements for quality."""
         validation_results = []
+
+        if full_text is None:
+            self.logger.error("Full text is required for validation")
+            return validation_results
         
         for req in requirements:
-            result = {"code": req["code"], "issues": []}
+            req_code = req.get("code")
+            req_description = req.get("description")
+            result = {"code": req_code, "issues": [], "similarity_score": None}
             
-            # Check code format
-            if not re.match(r'^[A-Z0-9-_\.#]+$', req["code"]):
-                result["issues"].append("Invalid code format")
-            
-            # Check description quality
-            if len(req["description"]) < 10:
-                result["issues"].append("Description too short")
-            
-            # Check for incomplete sentences
-            if not req["description"].strip().endswith(('.', '?', '!')):
-                result["issues"].append("Description may be incomplete")
-            
+            code_found_in_text = re.search(re.escape(req_code), full_text)
+            # Check if code is found in the text
+            if not code_found_in_text:
+                result["issues"].append(f"Code '{req_code}' not found in text")
+            else:
+                # Extract relevant context after the code
+                start_pos = code_found_in_text.end()
+                context = full_text[start_pos:min(len(full_text), start_pos + 2000)]
+                # Normalize whitespace for better matching
+                context_clean = self.normalize_whitespace(context)
+                description_clean = self.normalize_whitespace(req_description)
+
+                # Check if the description is present in the context
+                if description_clean in context_clean:
+                    result["similarity_score"] = 1.0
+                else:
+                    # If not, check for similarity
+                    s = difflib.SequenceMatcher(None, description_clean, context_clean)
+                    similarity = s.ratio()
+                    result["similarity_score"] = round(similarity, 2)
+                    result["issues"].append(f"Manual check required: Description does not perfectly match the text (similarity: {similarity:.2f})")
+
             # Set validation status
             result["status"] = "valid" if not result["issues"] else "warning"
             validation_results.append(result)
@@ -487,6 +506,7 @@ class RequirementsExtractor:
                 # Use the 5 most significant words (likely not stopwords due to length)
                 for word in words[:5]:
                     if word.lower() in full_text.lower():
+                        # Case-insensitive keyword search
                         idx = full_text.lower().find(word.lower())
                         start_pos = max(0, idx - 300)
                         end_pos = min(len(full_text), idx + 700)
@@ -557,7 +577,6 @@ class RequirementsExtractor:
         
         return verification_results
     
-#todo: see if the function below is needed    
     def merge_and_deduplicate_requirements(self, requirements):
         """Merge and deduplicate requirements from different sources."""
         # Create a dictionary to hold unique requirements by code
@@ -664,7 +683,8 @@ class RequirementsExtractor:
             val_data.append({
                 "Code": val["code"],
                 "Status": val["status"],
-                "Issues": ", ".join(val["issues"]) if val["issues"] else "None"
+                "Issues": ", ".join(val["issues"]) if val["issues"] else "None",
+                "Similarity Score": val["similarity_score"]
             })
         df_validation = pd.DataFrame(val_data)
         
@@ -772,7 +792,7 @@ class RequirementsExtractor:
         self.logger.info(f"Extracted {len(unique_requirements)} unique requirements.")
         
         # Validate requirements
-        validation_results = self.validate_requirements(unique_requirements)
+        validation_results = self.validate_requirements(unique_requirements, full_text)
         
         # Verify extraction
         verification_results = self.verify_extraction(full_text, unique_requirements)

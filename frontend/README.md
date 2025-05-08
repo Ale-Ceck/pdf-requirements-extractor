@@ -15,21 +15,24 @@ This is the React-based frontend for the PDF Requirements Extractor application.
 ## Setup and Installation
 
 1. Navigate to the frontend directory:
+
    ```
    cd frontend
    ```
 
 2. Install dependencies:
+
    ```
    npm install
    ```
 
 3. Start the development server:
+
    ```
    npm start
    ```
 
-4. Open [http://localhost:5001](http://localhost:5001) to view the application in your browser.
+4. Open [http://localhost:3000](http://localhost:3000) to view the application in your browser.
 
 ## Building for Production
 
