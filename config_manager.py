@@ -71,6 +71,7 @@ class ConfigManager:
         "extraction": {
             "provider": "openai",
             "model": "gpt-4o-mini",
+            "verification_enabled": True,  # Enable/disable verification process
             "verification_strategy": "different",  # same, different, specific
             "verification_provider": None,  # If None, use different provider
             "verification_model": None     # If None, use default model of verification provider
@@ -180,6 +181,10 @@ class ConfigManager:
         Args:
             new_config: New configuration values
         """
+        # Log the verification_enabled value before the update
+        if "verification_enabled" in new_config:
+            print(f"Updating verification_enabled to: {new_config['verification_enabled']}")
+        
         self.config["extraction"].update(new_config)
     
     def get_enabled_providers(self) -> List[str]:

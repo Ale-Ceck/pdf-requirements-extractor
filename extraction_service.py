@@ -151,6 +151,19 @@ class ExtractionService:
         Returns:
             Verification result
         """
+        # Check if verification is enabled - explicitly log the value to debug
+        verification_enabled = self.config.get("verification_enabled", True)
+        self.logger.info(f"Verification enabled setting: {verification_enabled}")
+        
+        # Skip verification if it's disabled
+        if not verification_enabled:
+            self.logger.info("Verification process is disabled, skipping verification")
+            return {
+                "verified": True,
+                "confidence": 1.0,
+                "reason": "Verification process is disabled"
+            }
+            
         # Determine which provider to use for verification
         verification_strategy = self.config.get("verification_strategy", "different")
         verification_provider = None

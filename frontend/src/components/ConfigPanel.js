@@ -9,8 +9,10 @@ import {
   MenuItem, 
   Button, 
   FormControl, 
+  FormControlLabel,
   InputLabel, 
   Select,
+  Switch,
   Grid,
   CircularProgress,
   Alert,
@@ -28,6 +30,7 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
     provider: '',
     model: '',
     apiKey: '',
+    verificationEnabled: true,
     verificationStrategy: 'different',
     verificationProvider: '',
     verificationModel: ''
@@ -62,6 +65,7 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
         provider: config.extraction.provider || 'openai',
         model: config.extraction.model || '',
         apiKey: config.providers?.[config.extraction.provider]?.api_key || '',
+        verificationEnabled: config.extraction.verification_enabled !== false, // Default to true if not specified
         verificationStrategy: config.extraction.verification_strategy || 'different',
         verificationProvider: config.extraction.verification_provider || '',
         verificationModel: config.extraction.verification_model || ''
@@ -117,15 +121,25 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
   
   // Handle online configuration changes
   const handleOnlineConfigChange = (field, value) => {
-    setOnlineConfig(prev => ({ ...prev, [field]: value }));
-    
-    // Update model list if provider changes
     if (field === 'provider') {
-      const defaultModel = getModelsForProvider(value)[0] || '';
-      setOnlineConfig(prev => ({ ...prev, model: defaultModel }));
+      const newProvider = value;
+      const defaultModel = getModelsForProvider(newProvider)[0] || '';
+      const newApiKey = config.providers?.[newProvider]?.api_key || ''; // Reset API key
+      setOnlineConfig(prev => ({
+        ...prev,
+        provider: newProvider,
+        model: defaultModel,
+        apiKey: newApiKey
+      }));
+      // Also reset verification provider if it was the same as the old provider
+      if (onlineConfig.verificationStrategy !== 'specific' || onlineConfig.verificationProvider === onlineConfig.provider) {
+           setOnlineConfig(prev => ({ ...prev, verificationProvider: '', verificationModel: '' }));
+      }
+  
+    } else {
+      setOnlineConfig(prev => ({ ...prev, [field]: value }));
     }
-    
-    // Update verification model list if verification provider changes
+  
     if (field === 'verificationProvider') {
       const defaultModel = getModelsForProvider(value)[0] || '';
       setOnlineConfig(prev => ({ ...prev, verificationModel: defaultModel }));
@@ -138,49 +152,99 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
   };
   
   // Save configuration
-  const saveConfig = () => {
+  const saveConfig = async () => {
+    let updatedPart = {};
     if (operationMode === 'online') {
       // Prepare online configuration
-      const newConfig = {
+       updatedPart = {
         extraction: {
           provider: onlineConfig.provider,
           model: onlineConfig.model,
+          verification_enabled: onlineConfig.verificationEnabled,
           verification_strategy: onlineConfig.verificationStrategy
         },
         providers: {
+          ...(config.providers || {}), //Preserve existing providers
           [onlineConfig.provider]: {
+            ...((config.providers && config.providers[onlineConfig.provider]) || {}), // Preserve existing provider settings
             api_key: onlineConfig.apiKey,
             enabled: true
           }
         }
       };
       
-      // Add verification provider and model if strategy is 'specific'
-      if (onlineConfig.verificationStrategy === 'specific') {
-        newConfig.extraction.verification_provider = onlineConfig.verificationProvider;
-        newConfig.extraction.verification_model = onlineConfig.verificationModel;
+      // Explicitly log the verification state to verify it's being set correctly
+      console.log("Setting verification_enabled to:", onlineConfig.verificationEnabled);
+
+      // Clear out the other provider if it exists and is different from the current one to avoid stale data
+      const otherProviderKey = onlineProviders.map(p => p.id).find(id => id !== onlineConfig.provider);
+      if (otherProviderKey && updatedPart.providers[otherProviderKey]) {
+        delete updatedPart.providers[otherProviderKey];
       }
-      
-      onChange(newConfig);
+
+      // Add verification provider and model if strategy is 'specific'
+      if (onlineConfig.verificationStrategy === 'specific' && onlineConfig.verificationEnabled) {
+        updatedPart.extraction.verification_provider = onlineConfig.verificationProvider;
+        updatedPart.extraction.verification_model = onlineConfig.verificationModel;
+      } else {
+        delete updatedPart.extraction.verification_provider;
+        delete updatedPart.extraction.verification_model;
+      }
+    
     } else {
       // Prepare offline configuration
-      const newConfig = {
+      updatedPart = {
         extraction: {
           provider: 'ollama',
           model: offlineConfig.model,
+          verification_enabled: false,  // Always disable verification in offline mode
           verification_strategy: 'same'
         },
         providers: {
+          ...(config.providers || {}), // Preserve existing providers
           ollama: {
+            ...((config.providers && config.providers.ollama) || {}), // Preserve existing provider settings
             server_url: offlineConfig.serverUrl,
             enabled: true
           }
         }
       };
+     // Clear out online provider settings if switching to offline
+     onlineProviders.forEach(p => {
+      if (updatedPart.providers[p.id]) {
+          delete updatedPart.providers[p.id]; 
+      }
+  });
+}
       
-      onChange(newConfig);
+      //Merge with existing config
+      const newFullConfig = {
+        ...config,
+        extraction: {
+          ...(config.extraction || {}),
+          ...updatedPart.extraction
+        },
+        providers: {
+          ...(config.providers || {}),
+          ...updatedPart.providers
+        }
+    };
+    
+    try {
+      // First update the local state through the onChange callback
+      onChange(newFullConfig);
+      
+      // Then actually save the configuration to the backend
+      const result = await ApiService.saveConfig(newFullConfig);
+      console.log("Configuration saved to server:", result);
+      
+      // Show a temporary success message
+      alert("Configuration saved successfully!");
+    } catch (error) {
+      console.error("Error saving configuration:", error);
+      alert("Failed to save configuration to server. Please try again.");
     }
-  };
+  }
   
   // Render online configuration panel
   const renderOnlineConfig = () => (
@@ -246,29 +310,45 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
       
       <Grid item xs={12}>
         <Divider sx={{ my: 1 }} />
-        <Typography variant="h6" gutterBottom>
-          Verification Settings
-        </Typography>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+          <Typography variant="h6" gutterBottom>
+            Verification Settings
+          </Typography>
+          <FormControl component="fieldset">
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={onlineConfig.verificationEnabled}
+                  onChange={(e) => handleOnlineConfigChange('verificationEnabled', e.target.checked)}
+                  color="primary"
+                />
+              }
+              label="Enable Verification"
+            />
+          </FormControl>
+        </Box>
       </Grid>
       
-      <Grid item xs={12} sm={6}>
-        <FormControl fullWidth>
-          <InputLabel id="verification-strategy-label">Verification Strategy</InputLabel>
-          <Select
-            labelId="verification-strategy-label"
-            id="verification-strategy"
-            value={onlineConfig.verificationStrategy}
-            label="Verification Strategy"
-            onChange={(e) => handleOnlineConfigChange('verificationStrategy', e.target.value)}
-          >
-            <MenuItem value="same">Same Provider</MenuItem>
-            <MenuItem value="different">Different Provider</MenuItem>
-            <MenuItem value="specific">Specific Provider</MenuItem>
-          </Select>
-        </FormControl>
-      </Grid>
+      {onlineConfig.verificationEnabled && (
+        <Grid item xs={12} sm={6}>
+          <FormControl fullWidth>
+            <InputLabel id="verification-strategy-label">Verification Strategy</InputLabel>
+            <Select
+              labelId="verification-strategy-label"
+              id="verification-strategy"
+              value={onlineConfig.verificationStrategy}
+              label="Verification Strategy"
+              onChange={(e) => handleOnlineConfigChange('verificationStrategy', e.target.value)}
+            >
+              <MenuItem value="same">Same Provider</MenuItem>
+              <MenuItem value="different">Different Provider</MenuItem>
+              <MenuItem value="specific">Specific Provider</MenuItem>
+            </Select>
+          </FormControl>
+        </Grid>
+      )}
       
-      {onlineConfig.verificationStrategy === 'specific' && (
+      {onlineConfig.verificationEnabled && onlineConfig.verificationStrategy === 'specific' && (
         <>
           <Grid item xs={12} sm={6}>
             <FormControl fullWidth>
@@ -322,6 +402,12 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
           sx={{ borderRadius: 1.5, mb: 2 }}
         >
           Offline mode: All processing happens locally. No data is sent over the internet.
+        </Alert>
+        <Alert 
+          severity="info"
+          sx={{ borderRadius: 1.5, mb: 2 }}
+        >
+          Verification process is automatically disabled in offline mode to optimize performance.
         </Alert>
       </Grid>
       
@@ -490,7 +576,11 @@ const ConfigPanel = ({ operationMode, availableProviders, config, onChange }) =>
         onClose={() => setShowAdvancedSettings(false)}
         config={config.app || {}}
         onSave={(newAdvancedConfig) => {
-          onChange({ app: newAdvancedConfig });
+          const newFullConfig = {
+            ...config, //Spread existing config
+            app: newAdvancedConfig // Update app settings
+          };
+          onChange(newFullConfig);
           setShowAdvancedSettings(false);
         }}
       />

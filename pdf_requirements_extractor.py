@@ -599,6 +599,18 @@ class RequirementsExtractor:
     def find_potential_missing_requirements(self, pdf_text, extracted_requirements):
         """Use LLM to identify potentially missed requirements without relying on patterns."""
         
+        # Check if verification is enabled
+        verification_enabled = self.config.get("verification_enabled", True)
+        
+        # For offline mode, always disable verification
+        if self.config_manager.use_offline_provider():
+            verification_enabled = False
+        
+        # Skip the process if verification is disabled
+        if not verification_enabled:
+            self.logger.info("Verification process is disabled, skipping missing requirements check")
+            return []
+        
         # Get extracted codes for reference
         extracted_codes = [req["code"] for req in extracted_requirements]
         
@@ -794,12 +806,40 @@ class RequirementsExtractor:
         # Validate requirements
         validation_results = self.validate_requirements(unique_requirements, full_text)
         
-        # Verify extraction
-        verification_results = self.verify_extraction(full_text, unique_requirements)
-        self.logger.info(f"Verified {len(verification_results['verified'])} requirements.")
+        # Check if verification is enabled
+        verification_enabled = self.config.get("verification_enabled", True)
         
-        if verification_results['potential_missing']:
-            self.logger.warning(f"{len(verification_results['potential_missing'])} potential issues found")
+        # For offline mode, always disable verification
+        if self.config_manager.use_offline_provider():
+            verification_enabled = False
+            self.logger.info("Offline mode detected: Verification process disabled")
+        
+        # Explicitly log the verification enabled status
+        self.logger.info(f"VERIFICATION ENABLED STATUS: {verification_enabled}")
+        self.logger.info(f"Raw config value: {self.config.get('verification_enabled')}")
+        
+        if verification_enabled:
+            # Verify extraction
+            verification_results = self.verify_extraction(full_text, unique_requirements)
+            self.logger.info(f"Verified {len(verification_results['verified'])} requirements.")
+            
+            if verification_results['potential_missing']:
+                self.logger.warning(f"{len(verification_results['potential_missing'])} potential issues found")
+        else:
+            # Create a default verification result with all requirements marked as verified
+            self.logger.info("Verification process is disabled, skipping verification")
+            verification_results = {
+                "verified": [req["code"] for req in unique_requirements],
+                "potential_missing": [],
+                "confidence_scores": {req["code"]: 1.0 for req in unique_requirements},
+                "verification_details": {
+                    req["code"]: {
+                        "verified": True,
+                        "confidence": 1.0,
+                        "reason": "Verification process is disabled"
+                    } for req in unique_requirements
+                }
+            }
         
         # Export results
         output_file = self.export_to_excel(
@@ -871,6 +911,7 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Disable caching")
     parser.add_argument("--no-parallel", action="store_true", help="Disable parallel processing")
     parser.add_argument("--no-tables", action="store_true", help="Disable table extraction")
+    parser.add_argument("--no-verification", action="store_true", help="Disable verification process")
     parser.add_argument("--workers", type=int, default=3, help="Number of parallel workers")
     
     # Provider selection arguments
@@ -894,6 +935,7 @@ def main():
         "use_cache": not args.no_cache,
         "parallel_processing": not args.no_parallel,
         "extract_tables": not args.no_tables,
+        "verification_enabled": not args.no_verification,
         "max_workers": args.workers,
         "enable_anthropic": args.enable_anthropic,
         "use_offline_provider": args.use_offline
